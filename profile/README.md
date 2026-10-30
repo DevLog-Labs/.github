@@ -103,8 +103,8 @@ flowchart LR
 > • 화면마다 Instruments의 `View Body (Legacy)`로 평가 횟수와 시간을 측정
 >
 > **결과** (Release 최적화(Staging) 빌드, iPhone 18 Pro 시뮬레이터(iOS 27.0), 변경 전후 각 5회 중앙값)<br>
-> • 알림 목록의 필터 전환 부모 `body` 평가 64회 → 3회, 분리 View 포함 시간 32.33ms → 20.28ms (더미 60건)<br>
-> • 공용 Todo 목록의 검색 열기와 취소 부모 `body` 평가 75회 → 3회, 분리 View 포함 시간 37.16ms → 20.92ms
+> • 알림 목록 필터 전환 30회 기준 부모 `body` 평가 64회 → 3회, 분리 View 포함 시간 32.33ms → 20.28ms (더미 60건)<br>
+> • 공용 Todo 목록 검색 열기와 취소 10회 기준 부모 `body` 평가 75회 → 3회, 분리 View 포함 시간 37.16ms → 20.92ms
 >
 > **트레이드오프**<br>
 > • 분리한 View가 추가로 평가되어 평가 횟수의 합은 늘었으나 시간의 합은 줄어듦 (알림 목록 64회 → 93회)
@@ -124,7 +124,7 @@ flowchart LR
 >
 > **해결 과정**<br>
 > • Todo 카테고리 설정을 로그인 세션 확인 뒤 1회 조회해 메모리 캐시(`MemoryCacheStore`)에 두고 repository가 캐시를 먼저 사용<br>
-> • 위젯 전체 조회는 로그인 세션 복구와 앱 실행 중 날짜 변경에서만 허용<br>
+> • 위젯 전체 조회는 로그인 세션 복구와 앱 실행 중 날짜가 바뀐 뒤 첫 백그라운드 전환에서만 허용<br>
 > • Todo 변경은 메모리 원본의 해당 항목만 갱신하고 설정 변경은 원본으로 스냅샷만 재생성
 >
 > **결과**<br>
@@ -140,7 +140,8 @@ flowchart LR
 > **배경**<br>
 > • 화면의 상태와 이벤트를 다루는 구조로 자체 `Store` 프로토콜을 사용했으며 Action이 State를 바꾸는 단방향 흐름만 제어함<br>
 > • 기존 구조에 장애나 결함은 없었으나 시트, 얼럿, 토글 값은 뷰에서 `Binding(get:set:)`으로 직접 구성함<br>
-> • 전환 직전 23개 뷰 파일에 `Binding(` 구성이 67곳 있었음
+> • 전환 직전 23개 뷰 파일에 `Binding(` 구성이 67곳 있었음<br>
+> • 전환 동기는 뷰의 `Binding` 구성을 Feature로 옮겨 뷰 코드를 줄이고 시트, 얼럿, 이동 대상(destination) 상태까지 라이브러리가 형태를 강제해 화면마다 구성 방식이 갈리지 않게 하는 것
 >
 > **전환 과정**<br>
 > • Binding은 TCA의 `BindingAction`으로, 시트와 얼럿은 `@Presents`와 `AlertState`로, 겹칠 수 있는 요청은 취소 ID와 `cancelInFlight`로 Feature(화면 단위 상태 모듈)에서 처리<br>
@@ -162,13 +163,12 @@ flowchart LR
 > • soft delete는 문서를 지우지 않고 삭제 표시만 남기는 방식임
 >
 > **문제**<br>
-> • 알림 삭제 대기 상태를 앱의 `pendingTask`와 토스트 수명이 정하고 있어 목록 갱신, 페이지네이션과 충돌함<br>
-> • 다른 화면이나 기기에서는 삭제 상태가 공유되지 않음<br>
-> • 삭제를 서버 지연 삭제(Cloud Tasks 작업 큐)로 옮긴 뒤에도 Todo는 즉시 soft delete를 쓰고 알림과 웹페이지는 지연 삭제를 써서 방식이 갈렸음<br>
-> • 로컬 Firebase Emulator 통합 테스트가 `500 INTERNAL`로 실패함
+> • 1단계(앱 지연 삭제): 알림 삭제 대기 상태를 앱의 `pendingTask`와 토스트 수명이 정해 목록 갱신, 페이지네이션과 충돌하고 다른 화면이나 기기에는 삭제 상태가 공유되지 않음<br>
+> • 2단계(서버 지연 삭제): 알림과 웹페이지는 서버에서 Cloud Tasks 작업 큐로 지연 삭제했으나 Todo는 즉시 soft delete를 써서 삭제 방식이 갈림<br>
+> • 로컬 Firebase Emulator에서는 큐 등록에 별도 Google credential이 필요해 통합 테스트가 `500 INTERNAL`로 실패함
 >
 > **해결 과정**<br>
-> • 삭제 요청 즉시 서버가 삭제 상태를 기록하고 Undo는 서버에 취소를 요청하는 방식으로 Todo, 알림, 웹페이지를 통일하고 Cloud Tasks 경로를 제거<br>
+> • 3단계(즉시 soft delete): 삭제 요청 즉시 서버가 삭제 상태를 기록하고 Undo는 서버에 취소를 요청하는 방식으로 Todo, 알림, 웹페이지를 통일하고 Cloud Tasks 경로를 제거<br>
 > • `catch` 내부 cleanup의 2차 예외가 원래 예외를 가려 두 오류를 분리 로깅하고 큐 등록 단계의 credential 오류를 확인<br>
 > • 매일 09:00 (KST)에 Cloud Scheduler가 삭제 표시된 알림을 제거하고 삭제 후 24시간이 지난 Todo는 표시용 최소 필드만 남기고 축약해 Firestore 저장 용량을 줄임
 >
