@@ -102,41 +102,35 @@ flowchart LR
 > • 상태 변경에 따라 재평가되는 영역을 같은 파일의 구조체 View로 분리하고 `store`(화면 상태 저장소)를 전달해 해당 View의 `body`에서만 상태를 읽게 함<br>
 > • 분리 기준은 읽는 상태이며 상태와 무관한 영역과 `send`만 호출하는 버튼은 분리하지 않고 부모에 유지<br>
 > • 반복되는 항목은 `store` 없이 값만 전달받는 구조체 View로 유지하거나 분리<br>
-> • 화면마다 Instruments의 `View Body (Legacy)`로 변경 전후의 재평가 횟수와 시간을 측정하고 개선이 확인되지 않은 항목은 개선으로 기록하지 않음
+> • 화면마다 Instruments의 `View Body (Legacy)`로 변경 전후의 재평가 횟수와 시간을 측정
 >
 > **결과** (Release 최적화(Staging) 빌드, iPhone 18 Pro 시뮬레이터(iOS 27.0), 변경 전후 각 5회 중앙값)<br>
-> • Todo 목록(더미 60건)에서 검색어를 한 글자씩 입력하는 키 입력 48번 기준 목록 화면 View 1개와 분리한 View 4개를 합한 재렌더링을 위한 평가 시간 69.55ms에서 26.31ms로 감소 (5회 범위 68.34 ~ 75.86ms에서 25.26 ~ 27.07ms로)<br>
+> • Todo 목록(더미 60건)에서 검색어를 한 글자씩 입력하는 키 입력 48번 기준으로 목록 화면 View 1개와 분리한 View 4개의 평가 시간 합이 69.55ms에서 26.31ms로 감소 (5회 범위 68.34 ~ 75.86ms에서 25.26 ~ 27.07ms로)<br>
 > • 같은 시나리오에서 목록 화면(부모 View)의 `body`는 최초 표시 때 1회만 평가되고 입력창 49회, 결과 목록 96회, 필터 헤더 50회처럼 분리한 View가 대신 평가됨 (최초 표시 포함)<br>
 > • 알림 목록(더미 60건)의 필터 전환 30회 기준 같은 방식으로 합산한 평가 시간 32.33ms에서 20.28ms로, Todo 목록의 검색 열기와 취소 10회 기준 37.16ms에서 20.92ms로 감소
 >
 > **트레이드오프**<br>
 > • 분리한 View가 추가로 평가되어 평가 횟수의 합은 늘었으나 시간의 합은 줄어듦 (검색어 입력 시 목록 화면과 분리한 View 4개의 평가 횟수 합 136회에서 200회로 증가)
 
-#### 2. 앱 시작과 위젯 갱신에서 반복되던 서버 조회를 로그인 세션 복구와 날짜 변경 때만 수행하도록 제한
+#### 2. 알림 탭의 당겨서 새로고침(pull-to-refresh)이 앱을 종료시키던 문제를 `@MainActor` 격리로 해결
 
 > **배경**<br>
-> • 홈 화면 위젯은 오늘의 Todo를 보여 주는 Today 위젯과 활동 히트맵을 보여 주는 Heatmap 위젯임<br>
-> • 위젯은 Firestore에서 조회한 Todo 데이터로 스냅샷(표시용 데이터)을 만들며 Firestore는 호출 수에 민감함<br>
-> • Today 위젯은 마감일이 있는 Todo와 없는 Todo를 각각 조회(2회)하고 Heatmap 위젯은 생성, 완료, 삭제 일시 기준으로 각각 조회(3회)해 스냅샷을 만듦
+> • SwiftUI의 `.refreshable`은 목록을 아래로 당기면 `async` 클로저를 실행해 새로고침을 수행하는 기능임<br>
+> • 상태 저장소 `Store`의 `send` 안에서 `dispatch_assert_queue`가 호출 큐를 검사함
 >
 > **문제**<br>
-> • 앱 최초 실행에서 Home 초기 데이터와 위젯 동기화가 Todo 카테고리 설정을 각자 조회해 같은 요청이 7회 발생함 (Home 2회, Today 위젯 2회, Heatmap 위젯 3회)<br>
-> • 위젯은 Todo를 조회하는 호출마다 카테고리 설정을 따로 조회해 요청 수가 Todo 조회 횟수(Today 2회, Heatmap 3회)만큼 늘어남<br>
-> • 위젯 동기화가 실행될 때마다 Today 2회와 Heatmap 3회를 전체 조회함<br>
-> • 같은 날짜의 백그라운드 전환, Todo 변경, 위젯 표시 설정 변경에도 이 조회가 반복될 수 있었음
+> • 알림 탭에서 당겨서 새로고침하면 앱이 종료되고 `EXC_BREAKPOINT`가 발생함<br>
+> • 호출 스택은 SwiftUI의 새로고침 컨트롤에서 `PushNotificationListView`의 새로고침 클로저를 거쳐 `Store.send`의 `dispatch_assert_queue`에서 실패함<br>
+> • 새로고침 클로저에 `MainActor` 격리가 없어 `Store.send`가 비동기 작업 실행 큐에서 호출됨
 >
 > **해결 과정**<br>
-> • Todo 카테고리 설정을 로그인 세션 확인 뒤 1회 조회해 메모리 캐시(`MemoryCacheStore`)에 두고 repository가 캐시를 먼저 사용<br>
-> • 위젯 전체 조회는 로그인 세션 복구와 앱 실행 중 날짜가 바뀐 뒤 첫 백그라운드 전환에서만 허용<br>
-> • Todo 변경은 메모리 원본의 해당 항목만 갱신하고 설정 변경은 원본으로 스냅샷만 재생성
+> • 새로고침 액션의 타입을 `@Sendable`에서 `@MainActor @Sendable`로 바꿔 `MainActor` 격리를 추가<br>
+> • `.refreshable` 내부에서 `await action()`으로 호출해 `.refresh`와 `.startObserving`이 `MainActor`에서 실행되도록 보장<br>
+> • TCA 내부 `send` 구현과 알림 갱신 순서는 변경하지 않음
 >
-> **결과**<br>
-> • 앱 최초 실행의 Todo 카테고리 요청 7회에서 1회로 감소<br>
-> • 같은 날짜의 백그라운드 전환에서 위젯 Todo 조회 5회에서 0회로 감소<br>
-> • Todo 변경과 설정 변경에서 전체 조회 제거
->
-> **트레이드오프**<br>
-> • 백그라운드 진입 뒤 조회 완료는 보장하지 않으며 완료되지 않은 상태는 다음 세션 동기화에서 회복
+> **결과** (Debug 빌드, iPhone 18 Pro 시뮬레이터(iOS 27.0), 알림 탭에서 당겨서 새로고침 각 3회)<br>
+> • 수정 전 3회 모두 앱이 종료되고 수정 후 3회 모두 정상 동작<br>
+> • 수정 전후 모두 TCA 1.26.2로 빌드해 비교
 
 #### 3. 단방향 흐름만 제어하던 자체 Store 프로토콜을 SwiftUI 상태 관리 라이브러리 TCA로 전환
 
@@ -243,7 +237,7 @@ flowchart LR
 | 구분 | 스택 |
 | --- | --- |
 | Client | Swift, SwiftUI, WidgetKit, AppIntents, The Composable Architecture, Combine, async/await |
-| Architecture | Tuist Modular based Clean Architecture |
+| Architecture | Clean Architecture (Tuist 모듈 분리) |
 | Backend | Firestore, Cloud Functions, Cloud Run (NestJS), Firebase Hosting, Cloud Messaging, Cloud Scheduler |
 | Auth | Firebase Authentication, Google, GitHub, Apple 로그인 |
 | Monitoring | Firebase Analytics, Crashlytics (BigQuery export) |
